@@ -1,0 +1,168 @@
+name: Build Malaysia state plate-letter GeoJSON
+
+on:
+  push:
+    paths:
+      - ".github/workflows/build-malaysia-plate-letters.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build GeoJSON
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import unicodedata
+          import urllib.request
+
+          SOURCE = "https://emily.bz/geojson/subdivision/MY_1.json"
+          OUTPUT = "MY_state_plate_letters.geojson"
+
+          plate = {
+              "Johor": "J",
+              "Kedah": "K",
+              "Kelantan": "D",
+              "Melaka": "M",
+              "Negeri Sembilan": "N",
+              "Pahang": "C",
+              "Pulau Pinang": "P",
+              "Perak": "A",
+              "Perlis": "R",
+              "Selangor": "B",
+              "Terengganu": "T",
+              "Sabah": "SA",
+              "Sarawak": "Q",
+          }
+
+          aliases = {
+              "johor": "Johor",
+              "kedah": "Kedah",
+              "kelantan": "Kelantan",
+              "melaka": "Melaka",
+              "malacca": "Melaka",
+              "negeri sembilan": "Negeri Sembilan",
+              "pahang": "Pahang",
+              "pulau pinang": "Pulau Pinang",
+              "penang": "Pulau Pinang",
+              "perak": "Perak",
+              "perlis": "Perlis",
+              "selangor": "Selangor",
+              "terengganu": "Terengganu",
+              "trengganu": "Terengganu",
+              "sabah": "Sabah",
+              "sarawak": "Sarawak",
+          }
+
+          iso_to_state = {
+              "MY-01": "Johor",
+              "MY-02": "Kedah",
+              "MY-03": "Kelantan",
+              "MY-04": "Melaka",
+              "MY-05": "Negeri Sembilan",
+              "MY-06": "Pahang",
+              "MY-07": "Pulau Pinang",
+              "MY-08": "Perak",
+              "MY-09": "Perlis",
+              "MY-10": "Selangor",
+              "MY-11": "Terengganu",
+              "MY-12": "Sabah",
+              "MY-13": "Sarawak",
+          }
+
+          def norm(value):
+              value = unicodedata.normalize("NFKD", str(value))
+              value = "".join(ch for ch in value if not unicodedata.combining(ch))
+              value = value.lower().replace("_", " ").replace("-", " ")
+              return " ".join(value.split())
+
+          def identify_state(properties):
+              # First prefer an explicit state name anywhere in the properties.
+              for value in properties.values():
+                  if not isinstance(value, str):
+                      continue
+                  n = norm(value)
+                  if n in aliases:
+                      return aliases[n]
+
+              # Then fall back to an ISO 3166-2 code if present.
+              for value in properties.values():
+                  if not isinstance(value, str):
+                      continue
+                  upper = value.upper()
+                  for iso, state in iso_to_state.items():
+                      if iso in upper:
+                          return state
+              return None
+
+          req = urllib.request.Request(SOURCE, headers={"User-Agent": "Mozilla/5.0"})
+          with urllib.request.urlopen(req, timeout=60) as response:
+              data = json.load(response)
+
+          if data.get("type") != "FeatureCollection":
+              raise RuntimeError("Source is not a GeoJSON FeatureCollection")
+
+          output_features = []
+          found = []
+
+          for feature in data.get("features", []):
+              props = feature.get("properties") or {}
+              state = identify_state(props)
+              if state not in plate:
+                  # Excludes Kuala Lumpur, Putrajaya and Labuan federal territories.
+                  continue
+
+              found.append(state)
+              output_features.append({
+                  "type": "Feature",
+                  "properties": {
+                      "name": plate[state],
+                      "state": state,
+                      "plate_prefix": plate[state],
+                  },
+                  "geometry": feature.get("geometry"),
+              })
+
+          counts = {state: found.count(state) for state in sorted(set(found))}
+          missing = sorted(set(plate) - set(found))
+          duplicates = {state: count for state, count in counts.items() if count != 1}
+          if missing or duplicates or len(output_features) != 13:
+              raise RuntimeError(
+                  f"Expected exactly one feature for each of 13 states. "
+                  f"missing={missing}, duplicates={duplicates}, total={len(output_features)}, "
+                  f"source_feature_count={len(data.get('features', []))}"
+              )
+
+          output = {
+              "type": "FeatureCollection",
+              "name": "Malaysia state vehicle plate letters",
+              "features": output_features,
+          }
+
+          with open(OUTPUT, "w", encoding="utf-8") as f:
+              json.dump(output, f, ensure_ascii=False, separators=(",", ":"))
+
+          print("Created", OUTPUT)
+          print({f["properties"]["state"]: f["properties"]["name"] for f in output_features})
+          PY
+
+      - name: Commit generated GeoJSON
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MY_state_plate_letters.geojson
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add Malaysia state plate-letter GeoJSON"
+            git push
+          fi
